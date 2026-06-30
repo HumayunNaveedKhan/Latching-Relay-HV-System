@@ -1,0 +1,196 @@
+/*
+  Contactor latch controller with WiFi AP portal
+  -----------------------------------------------
+  GPIO1 = ZMPT1 OUT  (ON trigger,  200-250VAC)
+  GPIO3 = ZMPT2 OUT  (OFF trigger, 200-250VAC)
+  GPIO6 = Relay module IN (active-LOW)
+
+  Logic:
+    ZMPT1 detects AC  → relay latches ON
+    ZMPT2 detects AC  → relay latches OFF
+    Both quiet        → hold current state
+
+  Portal: connect to WiFi "Contactor-Control" / 12345678
+          open browser → 192.168.4.1
+*/
+
+#include <WiFi.h>
+#include <WebServer.h>
+
+// ---------- Pins ----------
+#define ZMPT1_PIN   1
+#define ZMPT2_PIN   3
+#define RELAY_PIN   6
+
+// ---------- Relay polarity ----------
+// Most blue opto-isolated relay modules: LOW = coil energised
+#define RELAY_ENERGISE   LOW
+#define RELAY_DEENERGISE HIGH
+
+// ---------- AC detection ----------
+// Peak-to-peak ADC swing that counts as "AC present" (12-bit, 0-4095)
+// With no AC the ZMPT output sits flat at its bias midpoint → tiny swing
+// With 200-250VAC applied it swings widely.
+// Start at 400, reduce if triggers are being missed, raise if noise triggers.
+#define THRESHOLD 400
+#define SAMPLE_MS  40    // 2× 50Hz cycle
+
+// ---------- AP credentials ----------
+const char* AP_SSID = "Contactor-Control";
+const char* AP_PASS = "12345678";
+
+WebServer server(80);
+
+// ---------- State ----------
+bool relayState   = false;
+bool zmpt1Active  = false;
+bool zmpt2Active  = false;
+
+// ----------------------------------------
+// Measure whether AC is present on a pin
+// ----------------------------------------
+bool acPresent(int pin) {
+  int lo = 4095, hi = 0;
+  unsigned long t = millis();
+  while (millis() - t < SAMPLE_MS) {
+    int v = analogRead(pin);
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  return (hi - lo) > THRESHOLD;
+}
+
+// ----------------------------------------
+// Drive relay and update state variable
+// ----------------------------------------
+void setRelay(bool on) {
+  relayState = on;
+  digitalWrite(RELAY_PIN, on ? RELAY_ENERGISE : RELAY_DEENERGISE);
+}
+
+// ----------------------------------------
+// Web portal HTML (single page, JS polls /status every 2 s)
+// ----------------------------------------
+void handleRoot() {
+  server.send(200, "text/html", R"rawhtml(
+<!DOCTYPE html><html>
+<head>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Contactor</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:sans-serif;background:#0f0f1a;color:#ddd;display:flex;
+       flex-direction:column;align-items:center;padding:24px 16px;gap:16px}
+  h1{font-size:22px;color:#fff;margin-bottom:4px}
+  p.sub{font-size:13px;color:#777}
+  .card{background:#1c1c30;border-radius:14px;padding:18px 24px;width:100%;max-width:360px}
+  .label{font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+  .value{font-size:26px;font-weight:600}
+  .on {color:#22d46a}
+  .off{color:#e84040}
+  .row{display:flex;gap:12px;width:100%;max-width:360px}
+  .btn{flex:1;padding:14px;border:none;border-radius:10px;font-size:16px;
+       font-weight:600;cursor:pointer;transition:opacity .15s}
+  .btn:active{opacity:.75}
+  .btn-on {background:#22d46a;color:#000}
+  .btn-off{background:#e84040;color:#fff}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;
+       vertical-align:middle}
+  .dot-on{background:#22d46a;box-shadow:0 0 6px #22d46a}
+  .dot-off{background:#555}
+</style>
+</head>
+<body>
+<h1>&#9889; Contactor Control</h1>
+<p class='sub'>192.168.4.1</p>
+
+<div class='card'>
+  <div class='label'>Relay state</div>
+  <div class='value' id='relay'>--</div>
+</div>
+
+<div class='card'>
+  <div class='label'>ZMPT1 &mdash; ON trigger</div>
+  <div class='value' id='z1'>--</div>
+</div>
+
+<div class='card'>
+  <div class='label'>ZMPT2 &mdash; OFF trigger</div>
+  <div class='value' id='z2'>--</div>
+</div>
+
+<div class='row'>
+  <button class='btn btn-on'  onclick="cmd('/on')">&#9654; Manual ON</button>
+  <button class='btn btn-off' onclick="cmd('/off')">&#9646;&#9646; Manual OFF</button>
+</div>
+
+<script>
+function dot(on){ return '<span class="dot '+(on?'dot-on':'dot-off')+'">\u200b</span>'; }
+
+function update(d){
+  var r=document.getElementById('relay');
+  r.className='value '+(d.relay?'on':'off');
+  r.innerHTML=dot(d.relay)+(d.relay?'ON':'OFF');
+
+  var z1=document.getElementById('z1');
+  z1.className='value '+(d.zmpt1?'on':'off');
+  z1.innerHTML=dot(d.zmpt1)+(d.zmpt1?'AC Detected':'No Signal');
+
+  var z2=document.getElementById('z2');
+  z2.className='value '+(d.zmpt2?'on':'off');
+  z2.innerHTML=dot(d.zmpt2)+(d.zmpt2?'AC Detected':'No Signal');
+}
+
+function poll(){ fetch('/status').then(r=>r.json()).then(update).catch(()=>{}); }
+function cmd(url){ fetch(url).then(()=>poll()); }
+
+poll();
+setInterval(poll, 2000);
+</script>
+</body></html>
+)rawhtml");
+}
+
+void handleStatus() {
+  String j = "{\"relay\":";
+  j += relayState  ? "true" : "false";
+  j += ",\"zmpt1\":";
+  j += zmpt1Active ? "true" : "false";
+  j += ",\"zmpt2\":";
+  j += zmpt2Active ? "true" : "false";
+  j += "}";
+  server.send(200, "application/json", j);
+}
+
+void handleOn()  { setRelay(true);  server.send(200, "text/plain", "ON");  }
+void handleOff() { setRelay(false); server.send(200, "text/plain", "OFF"); }
+
+// ----------------------------------------
+void setup() {
+  Serial.begin(115200);
+  analogReadResolution(12);
+
+  pinMode(RELAY_PIN, OUTPUT);
+  setRelay(false);                      // start with contactor OFF
+
+  WiFi.softAP(AP_SSID, AP_PASS);
+  Serial.print("Portal ready → http://");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/",       handleRoot);
+  server.on("/status", handleStatus);
+  server.on("/on",     handleOn);
+  server.on("/off",    handleOff);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();                // keep the web server alive
+
+  zmpt1Active = acPresent(ZMPT1_PIN);  // ~40 ms each
+  zmpt2Active = acPresent(ZMPT2_PIN);  // ~40 ms each
+
+  // Latch logic — only act on a state change
+  if (zmpt1Active && !relayState) setRelay(true);
+  if (zmpt2Active &&  relayState) setRelay(false);
+}
