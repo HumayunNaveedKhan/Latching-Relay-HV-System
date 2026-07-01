@@ -1,0 +1,88 @@
+#define ZMPT2_PIN      3
+#define RELAY_PIN      10
+#define SAMPLE_COUNT   2000
+#define CALIBRATION    0.484f
+#define SPIKE_DELTA    15.0f
+#define SUSTAIN_MS     1000
+#define LOOP_DELAY     100
+
+bool relayState = false;
+
+void relayOn()  { pinMode(RELAY_PIN, OUTPUT); digitalWrite(RELAY_PIN, LOW); relayState = true;  }
+void relayOff() { pinMode(RELAY_PIN, INPUT);                                 relayState = false; }
+
+float measureVoltage(int pin) {
+  float sumSquares = 0;
+  int   midpoint   = 0;
+  for (int i = 0; i < SAMPLE_COUNT; i++) midpoint += analogRead(pin);
+  midpoint /= SAMPLE_COUNT;
+  for (int i = 0; i < SAMPLE_COUNT; i++) {
+    float v = analogRead(pin) - midpoint;
+    sumSquares += v * v;
+  }
+  return sqrt(sumSquares / SAMPLE_COUNT) * CALIBRATION;
+}
+
+unsigned long spikeStart  = 0;
+bool          spikeActive = false;
+float         baseline    = 0;
+
+void setup() {
+  Serial.begin(115200);
+  analogReadResolution(12);
+  relayOn();
+  Serial.println("=== BOOT === Relay ON");
+  Serial.println("Waiting 5 seconds...");
+  delay(5000);
+
+  baseline = measureVoltage(ZMPT2_PIN);
+  Serial.print("Baseline: ");
+  Serial.print(baseline, 1);
+  Serial.print(" VAC  |  Spike triggers above: ");
+  Serial.print(baseline + SPIKE_DELTA, 1);
+  Serial.println(" VAC");
+  Serial.println("Monitoring...");
+}
+
+void loop() {
+  float v     = measureVoltage(ZMPT2_PIN);
+  float delta = v - baseline;
+
+  Serial.print("ZMPT2: ");
+  Serial.print(v, 1);
+  Serial.print(" VAC  |  Delta: ");
+  Serial.print(delta, 1);
+  Serial.print("V  |  Relay: ");
+  Serial.print(relayState ? "ON" : "OFF");
+
+  if (delta > SPIKE_DELTA) {
+    if (!spikeActive) {
+      spikeActive = true;
+      spikeStart  = millis();
+      Serial.print("  |  Spike started...");
+    } else {
+      unsigned long held = millis() - spikeStart;
+      Serial.print("  |  Held ");
+      Serial.print(held);
+      Serial.print("ms");
+      if (held >= SUSTAIN_MS) {
+        // toggle
+        if (relayState) relayOff();
+        else            relayOn();
+        spikeActive = false;
+        spikeStart  = 0;
+        Serial.print("  |  TOGGLED → Relay now ");
+        Serial.print(relayState ? "ON" : "OFF");
+        // wait for spike to pass before monitoring again
+        delay(2000);
+      }
+    }
+  } else {
+    if (spikeActive) Serial.print("  |  Spike dropped, resetting.");
+    spikeActive = false;
+    spikeStart  = 0;
+  }
+
+  Serial.println();
+  delay(LOOP_DELAY);
+}
