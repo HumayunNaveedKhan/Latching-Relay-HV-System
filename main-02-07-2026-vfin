@@ -1,0 +1,80 @@
+/*
+ * ESP32-C3  —  SR-latch relay controller (interrupt version, relay drive fixed)
+ *
+ * This is the first (interrupt) SR latch, updated ONLY for the relay drive to
+ * match your proven ACTIVE-LOW module. Sensing is unchanged from that version:
+ * both contact COMs to GND, inputs use INPUT_PULLUP, so a CLOSED contact pulls
+ * its pin LOW -> we trigger on the FALLING edge.
+ *
+ *   ON  contact (COM -> GND)  ->  GPIO1    momentary, active-LOW
+ *   OFF contact (COM -> GND)  ->  GPIO3    momentary, active-LOW
+ *   Relay module IN           ->  GPIO10
+ *
+ * Relay drive (ACTIVE-LOW, 5V-referenced module):
+ *   relayOn()  = drive pin LOW   -> opto conducts -> relay energized
+ *   relayOff() = release to Hi-Z (INPUT) -> module's pull-up de-energizes it
+ *   (Driving 3.3V HIGH would not fully release a 5V input, so "off" is INPUT.)
+ *
+ * Behaviour (set-reset latch):
+ *   an ON  pulse -> relay ON,  holds until an OFF pulse arrives
+ *   an OFF pulse -> relay OFF, holds until an ON  pulse arrives
+ *
+ * Each command is a burst of short spikes; the interrupt catches every edge,
+ * BURST_WINDOW_MS collapses a burst to one event, and the latch is idempotent
+ * so repeats do nothing. CROSS_GUARD_MS rejects a stray spike on the opposite
+ * line while the other line is active.
+ */
+
+#define PIN_ON     1     // ON  contact
+#define PIN_OFF    3     // OFF contact
+#define PIN_RELAY  10    // active-LOW relay module input
+
+#define BURST_WINDOW_MS  1000   // > your largest intra-burst gap (~540 ms)
+#define CROSS_GUARD_MS   1000   // ignore opposite line this long after activity (0 = off)
+
+volatile bool onEdge  = false;
+volatile bool offEdge = false;
+
+bool     relayState = false;     // false = OFF, true = ON
+uint32_t lastOnMs = 0, lastOffMs = 0;
+
+void IRAM_ATTR isrOn()  { onEdge  = true; }
+void IRAM_ATTR isrOff() { offEdge = true; }
+
+// ACTIVE-LOW relay: LOW = energized, Hi-Z (INPUT) = released.
+void relayOn()  { pinMode(PIN_RELAY, OUTPUT); digitalWrite(PIN_RELAY, LOW); relayState = true;  }
+void relayOff() { pinMode(PIN_RELAY, INPUT);                                relayState = false; }
+
+void setup() {
+  Serial.begin(115200);
+  relayOff();                       // safe default: relay OFF on boot
+
+  pinMode(PIN_ON,  INPUT_PULLUP);   // contact closed pulls the pin LOW
+  pinMode(PIN_OFF, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_ON),  isrOn,  FALLING);
+  attachInterrupt(digitalPinToInterrupt(PIN_OFF), isrOff, FALLING);
+
+  Serial.println(F("SR-latch relay controller ready - relay OFF."));
+}
+
+void loop() {
+  uint32_t now = millis();
+
+  // ---- ON edge -> SET ----
+  if (onEdge) {
+    onEdge = false;
+    bool fresh = (now - lastOnMs) >= BURST_WINDOW_MS;
+    bool guard = CROSS_GUARD_MS && (now - lastOffMs) < CROSS_GUARD_MS;
+    lastOnMs = now;
+    if (fresh && !guard && !relayState) { relayOn();  Serial.printf("%lu ms  ON  -> relay ON\n", now); }
+  }
+
+  // ---- OFF edge -> RESET ----
+  if (offEdge) {
+    offEdge = false;
+    bool fresh = (now - lastOffMs) >= BURST_WINDOW_MS;
+    bool guard = CROSS_GUARD_MS && (now - lastOnMs) < CROSS_GUARD_MS;
+    lastOffMs = now;
+    if (fresh && !guard && relayState) { relayOff(); Serial.printf("%lu ms  OFF -> relay OFF\n", now); }
+  }
+}
