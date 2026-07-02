@@ -1,0 +1,97 @@
+/*
+ * ESP32-C3  —  SR-latch relay controller (interrupt, active-LOW relay)
+ *              + false-trigger rejection
+ *
+ * Sensing unchanged: both contact COMs to GND, INPUT_PULLUP, closed = LOW,
+ * interrupts on FALLING.
+ *   ON  contact -> GPIO1
+ *   OFF contact -> GPIO3
+ *   Relay IN    -> GPIO10   (active-LOW: LOW = on, Hi-Z/INPUT = off)
+ *
+ * Two filters remove the false triggers seen in the log:
+ *
+ *  1) BURST CONFIRMATION — a real command is a dense burst of spikes; a false
+ *     trigger is usually one stray edge (noise) or a short bounce. We act only
+ *     after MIN_EDGES edges arrive on a line with gaps under QUIET_MS between
+ *     them. A lone glitch never reaches the count.
+ *
+ *  2) SETTLE LOCKOUT — after the relay changes state, the breaker mechanism can
+ *     throw a short echo on the OPPOSITE line a second or two later (the 2.7 s
+ *     OFF right after an ON in your log). For SETTLE_MS after any change we
+ *     ignore the opposite line, so that echo can't flip it back.
+ *
+ * The latch is still idempotent: repeats of the current state do nothing.
+ */
+
+#define PIN_ON     1
+#define PIN_OFF    3
+#define PIN_RELAY  10
+
+#define MIN_EDGES   3      // edges needed to accept a command (a real burst is dense)
+#define QUIET_MS    800    // gap that ends a burst; > your ~540 ms intra-burst gap
+#define SETTLE_MS   3000   // ignore opposite line this long after a change.
+                           // Must exceed the echo delay (~2.7 s) but stay below
+                           // your fastest real ON<->OFF reversal (~4.4 s here).
+
+volatile bool onEdge  = false;
+volatile bool offEdge = false;
+
+bool     relayState   = false;
+uint32_t lastChangeMs = 0;
+uint32_t onLastEdge = 0, offLastEdge = 0;
+uint16_t onCount = 0, offCount = 0;
+
+void IRAM_ATTR isrOn()  { onEdge  = true; }
+void IRAM_ATTR isrOff() { offEdge = true; }
+
+// ACTIVE-LOW relay: LOW = energized, Hi-Z (INPUT) = released.
+void relayOn()  { pinMode(PIN_RELAY, OUTPUT); digitalWrite(PIN_RELAY, LOW); relayState = true;  }
+void relayOff() { pinMode(PIN_RELAY, INPUT);                                relayState = false; }
+
+void setup() {
+  Serial.begin(115200);
+  relayOff();                       // safe default: OFF on boot
+
+  pinMode(PIN_ON,  INPUT_PULLUP);
+  pinMode(PIN_OFF, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_ON),  isrOn,  FALLING);
+  attachInterrupt(digitalPinToInterrupt(PIN_OFF), isrOff, FALLING);
+
+  Serial.println(F("SR-latch relay controller ready - relay OFF."));
+}
+
+void loop() {
+  uint32_t now = millis();
+
+  // ---- ON edge -> SET ----
+  if (onEdge) {
+    onEdge = false;
+    if (now - onLastEdge > QUIET_MS) onCount = 0;   // gap -> start a new burst
+    onLastEdge = now;
+    if (onCount < 0xFFFF) onCount++;
+    bool confirmed = (onCount >= MIN_EDGES);
+    bool settled   = (now - lastChangeMs) >= SETTLE_MS;
+    if (confirmed && settled && !relayState) {
+      relayOn();
+      lastChangeMs = now;
+      onCount = 0; offCount = 0;                     // clear any opposite echo
+      Serial.printf("%lu ms  ON  -> relay ON\n", now);
+    }
+  }
+
+  // ---- OFF edge -> RESET ----
+  if (offEdge) {
+    offEdge = false;
+    if (now - offLastEdge > QUIET_MS) offCount = 0;
+    offLastEdge = now;
+    if (offCount < 0xFFFF) offCount++;
+    bool confirmed = (offCount >= MIN_EDGES);
+    bool settled   = (now - lastChangeMs) >= SETTLE_MS;
+    if (confirmed && settled && relayState) {
+      relayOff();
+      lastChangeMs = now;
+      onCount = 0; offCount = 0;
+      Serial.printf("%lu ms  OFF -> relay OFF\n", now);
+    }
+  }
+}
