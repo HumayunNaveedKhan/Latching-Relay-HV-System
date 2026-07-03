@@ -1,0 +1,31 @@
+/*
+ * ESP32-C3 — bare sniffer, no filters, fastest response
+ *   ON  -> GPIO1   (via opto, active-low: closed = LOW)
+ *   OFF -> GPIO3
+ * Prints the instant either line changes. Nothing else.
+ */
+
+const int PIN_ON  = 1;
+const int PIN_OFF = 3;
+
+int lastOn = -1, lastOff = -1;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(PIN_ON,  INPUT_PULLUP);
+  pinMode(PIN_OFF, INPUT_PULLUP);
+  Serial.println("watching GPIO1(ON) GPIO3(OFF)...");
+}
+
+void loop() {
+  int on  = digitalRead(PIN_ON);
+  int off = digitalRead(PIN_OFF);
+
+  if (on != lastOn || off != lastOff) {
+    Serial.printf("%lu ms  ON=%s  OFF=%s\n",
+                  millis(),
+                  on  == LOW ? "CLOSED" : "open",
+                  off == LOW ? "CLOSED" : "open");
+    lastOn = on; lastOff = off;
+  }
+}
