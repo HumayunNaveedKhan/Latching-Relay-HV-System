@@ -1,0 +1,96 @@
+/*
+ * ESP32-C3 — robust relay control (LOW-trigger module: 0 = ON, 1 = OFF)
+ *
+ * Goal: stop needing a manual reset when it "sticks" after a few cycles.
+ * Three coding measures:
+ *
+ *  1) WATCHDOG — if the loop locks up (EMI hang), the chip auto-resets
+ *     instead of freezing until you press the button.
+ *  2) STATE MEMORY — the last ON/OFF command is saved in flash and restored
+ *     on boot, so any reset returns the relay to where it was, by itself.
+ *  3) RESET REASON — printed on every boot so you can see WHY it reset:
+ *       BROWNOUT           -> supply dip  (fix: separate 5V for the relay,
+ *                                          bulk cap on the ESP rail)
+ *       PANIC / WATCHDOG    -> EMI hang    (fix: coil snubber, isolation,
+ *                                          filter the sense lines)
+ *
+ *   Module IN  -> GPIO10   (LOW-trigger: LOW = ON, HIGH = OFF)
+ *   Module DC- -> ESP GND  ;  DC+ -> 5V
+ *
+ * Serial @115200:  1/o = ON,  0/f = OFF,  t = toggle
+ */
+
+#include "esp_task_wdt.h"
+#include <Preferences.h>
+
+#define RELAY_PIN     10
+#define WDT_TIMEOUT   8        // seconds before an unresponsive loop is reset
+#define RESTORE_STATE true     // false = always boot OFF (use if it ever boot-loops)
+
+Preferences prefs;
+bool relayState = false;
+
+// LOW-trigger module: LOW = relay ON, HIGH = relay OFF.1
+void driveRelay() { digitalWrite(RELAY_PIN, relayState ? LOW : HIGH); }
+
+void setRelay(bool on) {
+  if (on == relayState) { driveRelay(); return; }   // re-assert, no flash write
+  relayState = on;
+  driveRelay();
+  prefs.putBool("state", relayState);               // remember across resets
+  Serial.printf("Relay %s\n", on ? "ON (0)" : "OFF (1)");
+}
+
+void printResetReason() {
+  const char* s;
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  s = "power-on";              break;
+    case ESP_RST_SW:       s = "software";              break;
+    case ESP_RST_PANIC:    s = "PANIC / crash (EMI?)";  break;
+    case ESP_RST_INT_WDT:  s = "INTERRUPT wdt (EMI?)";  break;
+    case ESP_RST_TASK_WDT: s = "TASK wdt / hang (EMI?)";break;
+    case ESP_RST_WDT:      s = "watchdog";              break;
+    case ESP_RST_BROWNOUT: s = "BROWNOUT / supply dip"; break;
+    default:               s = "other";                break;
+  }
+  Serial.printf("Reset reason: %s\n", s);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);            // OFF first, before anything else
+
+  printResetReason();
+
+  prefs.begin("relay", false);
+  relayState = RESTORE_STATE ? prefs.getBool("state", false) : false;
+  delay(300);                               // let the supply settle before driving
+  driveRelay();
+  Serial.printf("Relay restored: %s\n", relayState ? "ON" : "OFF");
+
+  // Watchdog: auto-reset if loop() stops petting it for WDT_TIMEOUT seconds.
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  esp_task_wdt_config_t wdt = { .timeout_ms = WDT_TIMEOUT * 1000,
+                                .idle_core_mask = 0, .trigger_panic = true };
+  esp_task_wdt_reconfigure(&wdt);
+#else
+  esp_task_wdt_init(WDT_TIMEOUT, true);
+#endif
+  esp_task_wdt_add(NULL);
+
+  Serial.println("Ready. Send 1=ON, 0=OFF, t=toggle.");
+}
+
+void loop() {
+  esp_task_wdt_reset();                      // pet the watchdog every pass
+
+  if (Serial.available()) {
+    char c = Serial.read();
+    if      (c == '1' || c == 'o' || c == 'O') setRelay(true);
+    else if (c == '0' || c == 'f' || c == 'F') setRelay(false);
+    else if (c == 't' || c == 'T')             setRelay(!relayState);
+  }
+}
