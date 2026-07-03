@@ -1,0 +1,73 @@
+/*
+ * ESP32-C3 — high-sensitivity meter contact sniffer
+ *
+ *   ON  contact -> GPIO1   (its COM -> GND, INPUT_PULLUP, closed = LOW)
+ *   OFF contact -> GPIO3   (its COM -> GND)
+ *
+ * A hand jumper is a SUSTAINED closure; the meter sends a BURST of very short
+ * pulses (often < 1 ms). This build polls with NO delay so it can't miss a
+ * short pulse, measures each closure's width in microseconds, and reports
+ * counts + min/max width once a second.
+ *
+ * If a hand jumper bumps the counters but operating the meter does not:
+ *   - shrink/remove the RC filter (cap <= 1 nF, series R <= 1 k) -- it is
+ *     rounding off the short pulses, or
+ *   - the meter isn't delivering the closure to these terminals: jumper AT
+ *     the meter terminals and command it to the OPPOSITE state to force a pulse.
+ */
+
+const int PIN_ON  = 1;
+const int PIN_OFF = 3;
+const uint32_t REPORT_MS = 1000;
+
+int lastOn = HIGH, lastOff = HIGH;
+uint32_t onCloses = 0, offCloses = 0;
+uint32_t onLowStart = 0, offLowStart = 0;
+uint32_t onMinUs = 0xFFFFFFFF, onMaxUs = 0;
+uint32_t offMinUs = 0xFFFFFFFF, offMaxUs = 0;
+uint32_t lastReport = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+  pinMode(PIN_ON,  INPUT_PULLUP);
+  pinMode(PIN_OFF, INPUT_PULLUP);
+  Serial.println("\n=== High-sensitivity sniffer (no-delay poll, width-timed) ===");
+  Serial.println("Operate the meter (change its state). Watch closes on:/off: rise.");
+  Serial.println("width = how long each pulse held LOW (us). Sub-ms is normal.\n");
+}
+
+void loop() {
+  uint32_t us = micros();
+  int on  = digitalRead(PIN_ON);
+  int off = digitalRead(PIN_OFF);
+
+  // ON line
+  if (on == LOW && lastOn == HIGH) { onLowStart = us; onCloses++; }
+  else if (on == HIGH && lastOn == LOW) {
+    uint32_t w = us - onLowStart;
+    if (w < onMinUs) onMinUs = w;
+    if (w > onMaxUs) onMaxUs = w;
+  }
+  lastOn = on;
+
+  // OFF line
+  if (off == LOW && lastOff == HIGH) { offLowStart = us; offCloses++; }
+  else if (off == HIGH && lastOff == LOW) {
+    uint32_t w = us - offLowStart;
+    if (w < offMinUs) offMinUs = w;
+    if (w > offMaxUs) offMaxUs = w;
+  }
+  lastOff = off;
+
+  // periodic report (kept out of the hot path so pulses aren't missed)
+  if (millis() - lastReport >= REPORT_MS) {
+    lastReport = millis();
+    Serial.printf("ON  now=%s closes=%lu width[min/max]=%lu/%lu us  |  "
+                  "OFF now=%s closes=%lu width[min/max]=%lu/%lu us\n",
+                  digitalRead(PIN_ON)  == LOW ? "LOW " : "HIGH",
+                  onCloses,  onMinUs  == 0xFFFFFFFF ? 0 : onMinUs,  onMaxUs,
+                  digitalRead(PIN_OFF) == LOW ? "LOW " : "HIGH",
+                  offCloses, offMinUs == 0xFFFFFFFF ? 0 : offMinUs, offMaxUs);
+  }
+}
