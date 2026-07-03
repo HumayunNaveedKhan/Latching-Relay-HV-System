@@ -1,0 +1,156 @@
+/*
+ * ESP32-C3 — Hexing meter -> contactor controller
+ * FINAL, burst-DENSITY detection (matches the measured signal), no external parts.
+ *
+ * Measured signal: a real command is a FIREHOSE of very short pulses
+ *   (5-113 us each, ~700-1000 closes/second, lasting several seconds).
+ *   Idle is dead quiet (~0-1 closes/second). So we detect DENSITY, not width.
+ *
+ * WIRING (nothing in between):
+ *   ON  contact -> GPIO1 ,  its COM -> GND
+ *   OFF contact -> GPIO3 ,  its COM -> GND
+ *   Relay IN (LOW-trigger) -> GPIO10  (relay on its own 5V, common GND w/ ESP)
+ *   Pins use internal INPUT_PULLUP: idle HIGH, each pulse pulls LOW.
+ *
+ * DETECTION:
+ *   Count closes per WINDOW_MS. A window with >= ACTIVE_CLOSES closes is
+ *   "active". CONFIRM_WINDOWS consecutive active windows = a real command.
+ *   One or two stray spikes never fill a window; a brief echo never sustains.
+ *
+ * LATCH:  ON burst -> relay ON (held) ; OFF burst -> relay OFF (held).
+ * OVERRIDE (Serial @115200):  1 = ON,  0 = OFF,  t = toggle.
+ * Plus watchdog auto-recovery, state saved/restored across resets, reset reason.
+ *
+ * TUNING: real windows carry 100s of closes, idle carries 0, so ACTIVE_CLOSES
+ *   has huge margin. Raise it or CONFIRM_WINDOWS if noise ever leaks; lower if
+ *   a real command is missed.
+ */
+
+#include "esp_task_wdt.h"
+#include <Preferences.h>
+
+#define PIN_ON        1
+#define PIN_OFF       3
+#define PIN_RELAY     10
+
+#define WINDOW_MS       250    // counting window
+#define ACTIVE_CLOSES   20     // closes in a window to call it "active"
+#define CONFIRM_WINDOWS 2      // consecutive active windows to accept a command
+#define SETTLE_MS       1500   // ignore opposite line this long after a change
+
+#define WDT_TIMEOUT     8
+#define RESTORE_STATE   true
+#define DEBUG_WINDOWS   true   // print a line per active window (set false when happy)
+
+Preferences prefs;
+
+bool     relayState   = true;
+uint32_t lastChangeMs = 0;
+
+int      onPrev = HIGH, offPrev = HIGH;
+uint16_t onEdges = 0, offEdges = 0;        // closes in the current window
+uint8_t  onStreak = 0, offStreak = 0;      // consecutive active windows
+uint32_t windowStart = 0;
+
+void driveRelay() { digitalWrite(PIN_RELAY, relayState ? HIGH : LOW); }   // LOW-trigger
+
+void setRelay(bool on, uint32_t now) {
+  if (on == relayState) { driveRelay(); return; }
+  relayState = on;
+  driveRelay();
+  prefs.putBool("state", relayState);
+  lastChangeMs = now;
+  onStreak = 0; offStreak = 0;
+  Serial.printf("%lu ms  relay %s\n", now, on ? "ON" : "OFF");
+}
+
+void printResetReason() {
+  const char* s;
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  s = "power-on";               break;
+    case ESP_RST_SW:       s = "software";               break;
+    case ESP_RST_PANIC:    s = "PANIC / crash (EMI?)";   break;
+    case ESP_RST_INT_WDT:  s = "INTERRUPT wdt (EMI?)";   break;
+    case ESP_RST_TASK_WDT: s = "TASK wdt / hang (EMI?)"; break;
+    case ESP_RST_WDT:      s = "watchdog";               break;
+    case ESP_RST_BROWNOUT: s = "BROWNOUT / supply dip";  break;
+    default:               s = "other";                  break;
+  }
+  Serial.printf("Reset reason: %s\n", s);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  pinMode(PIN_RELAY, OUTPUT);
+  digitalWrite(PIN_RELAY, HIGH);            // OFF first (LOW-trigger)
+
+  printResetReason();
+
+  prefs.begin("relay", false);
+  relayState = RESTORE_STATE ? prefs.getBool("state", false) : false;
+  delay(300);
+  driveRelay();
+  Serial.printf("Relay restored: %s\n", relayState ? "ON" : "OFF");
+
+  pinMode(PIN_ON,  INPUT_PULLUP);
+  pinMode(PIN_OFF, INPUT_PULLUP);
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  esp_task_wdt_config_t wdt = { .timeout_ms = WDT_TIMEOUT * 1000,
+                                .idle_core_mask = 0, .trigger_panic = true };
+  esp_task_wdt_reconfigure(&wdt);
+#else
+  esp_task_wdt_init(WDT_TIMEOUT, true);
+#endif
+  esp_task_wdt_add(NULL);
+
+  windowStart  = millis();
+  lastChangeMs = millis() - SETTLE_MS - 1;  // don't block the first command
+  Serial.println(F("Controller ready (density detect). 1=ON 0=OFF t=toggle."));
+}
+
+void loop() {
+  esp_task_wdt_reset();
+
+  // ---- count closes as fast as possible ----
+  int onRaw  = digitalRead(PIN_ON);
+  int offRaw = digitalRead(PIN_OFF);
+  if (onPrev  == HIGH && onRaw  == LOW) onEdges++;
+  if (offPrev == HIGH && offRaw == LOW) offEdges++;
+  onPrev  = onRaw;
+  offPrev = offRaw;
+
+  uint32_t now = millis();
+
+  // ---- evaluate at each window boundary ----
+  if (now - windowStart >= WINDOW_MS) {
+    windowStart = now;
+
+    bool onActive  = (onEdges  >= ACTIVE_CLOSES);
+    bool offActive = (offEdges >= ACTIVE_CLOSES);
+
+    if (DEBUG_WINDOWS && (onEdges || offEdges))
+      Serial.printf("win  ON:%u  OFF:%u  (relay %s)\n",
+                    onEdges, offEdges, relayState ? "ON" : "OFF");
+
+    onStreak  = onActive  ? onStreak  + 1 : 0;
+    offStreak = offActive ? offStreak + 1 : 0;
+
+    if (onStreak  >= CONFIRM_WINDOWS && (now - lastChangeMs) >= SETTLE_MS && !relayState)
+      setRelay(true, now);
+    if (offStreak >= CONFIRM_WINDOWS && (now - lastChangeMs) >= SETTLE_MS &&  relayState)
+      setRelay(false, now);
+
+    onEdges = 0; offEdges = 0;
+  }
+
+  // ---- serial override ----
+  if (Serial.available()) {
+    char c = Serial.read();
+    if      (c == '1' || c == 'o' || c == 'O') setRelay(true,  now);
+    else if (c == '0' || c == 'f' || c == 'F') setRelay(false, now);
+    else if (c == 't' || c == 'T')             setRelay(!relayState, now);
+  }
+}
