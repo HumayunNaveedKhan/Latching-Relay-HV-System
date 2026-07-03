@@ -1,0 +1,154 @@
+/*
+ * ESP32-C3 — Hexing meter -> contactor controller  (FINAL, integrated)
+ * ------------------------------------------------------------------------
+ * Reads the meter's momentary ON / OFF contacts and latches a relay that
+ * drives the contactor coil. Built to survive the contactor's switching
+ * noise: it polls (no interrupt storms), rejects false triggers, auto-
+ * recovers from hangs, and remembers its state across resets.
+ *
+ * WIRING
+ *   ON  contact  -> GPIO1   (COM to GND, INPUT_PULLUP: closed = LOW)
+ *   OFF contact  -> GPIO3   (COM to GND, INPUT_PULLUP: closed = LOW)
+ *   Relay IN     -> GPIO10  (LOW-trigger module: LOW = ON, HIGH = OFF)
+ *   Relay DC-/GND-> ESP GND ;  Relay DC+ -> 5V (its own supply if possible)
+ *   Recommended: 1k series + 1-10nF to GND + 4.7-10k pull-up on GPIO1/GPIO3;
+ *   RC snubber across the contactor coil; bulk cap on the ESP 5V rail.
+ *
+ * LOGIC
+ *   ON  burst -> relay ON,  holds until an OFF burst  (idempotent SR latch)
+ *   OFF burst -> relay OFF, holds until an ON  burst
+ *   BURST CONFIRMATION: act only after MIN_EDGES edges within QUIET_MS
+ *                       (a real command is a dense burst; a glitch isn't).
+ *   SETTLE LOCKOUT:     ignore the opposite line for SETTLE_MS after a change
+ *                       (kills the mechanical echo on the other contact).
+ *
+ * RESILIENCE
+ *   WATCHDOG     -> auto-reset if the loop ever hangs.
+ *   STATE MEMORY -> last ON/OFF saved in flash, restored on boot.
+ *   RESET REASON -> printed each boot (BROWNOUT = supply, PANIC/WDT = EMI).
+ *
+ * Serial @115200 override for testing:  1/o = ON,  0/f = OFF,  t = toggle
+ */
+
+#include "esp_task_wdt.h"
+#include <Preferences.h>
+
+#define PIN_ON        1
+#define PIN_OFF       3
+#define PIN_RELAY     10
+
+#define MIN_EDGES     3        // edges needed to accept a command
+#define QUIET_MS      800      // gap that ends a burst; > ~540 ms intra-burst gap
+#define SETTLE_MS     3000     // ignore opposite line this long after a change
+                               // (> ~2.7 s echo, < ~4.4 s fastest real reversal)
+
+#define WDT_TIMEOUT   8        // seconds before an unresponsive loop is reset
+#define RESTORE_STATE true     // false = always boot OFF (use if it boot-loops)
+
+Preferences prefs;
+
+bool     relayState   = false;
+uint32_t lastChangeMs = 0;
+uint32_t onLastEdge = 0, offLastEdge = 0;
+uint16_t onCount = 0, offCount = 0;
+int      onPrev = HIGH, offPrev = HIGH;
+
+// LOW-trigger relay: LOW = energized, HIGH = released.
+void driveRelay() { digitalWrite(PIN_RELAY, relayState ? LOW : HIGH); }
+
+// Change state (from a command or serial): drive, remember, log, arm settle.
+void applyState(bool on, uint32_t now) {
+  if (on == relayState) { driveRelay(); return; }   // no change -> no flash write
+  relayState = on;
+  driveRelay();
+  prefs.putBool("state", relayState);               // survive resets
+  lastChangeMs = now;
+  onCount = 0; offCount = 0;                         // clear any opposite echo
+  Serial.printf("%lu ms  relay %s\n", now, on ? "ON" : "OFF");
+}
+
+void printResetReason() {
+  const char* s;
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  s = "power-on";               break;
+    case ESP_RST_SW:       s = "software";               break;
+    case ESP_RST_PANIC:    s = "PANIC / crash (EMI?)";   break;
+    case ESP_RST_INT_WDT:  s = "INTERRUPT wdt (EMI?)";   break;
+    case ESP_RST_TASK_WDT: s = "TASK wdt / hang (EMI?)"; break;
+    case ESP_RST_WDT:      s = "watchdog";               break;
+    case ESP_RST_BROWNOUT: s = "BROWNOUT / supply dip";  break;
+    default:               s = "other";                  break;
+  }
+  Serial.printf("Reset reason: %s\n", s);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  pinMode(PIN_RELAY, OUTPUT);
+  digitalWrite(PIN_RELAY, HIGH);            // OFF first (LOW-trigger)
+
+  printResetReason();
+
+  // restore last commanded state so a reset returns where it was
+  prefs.begin("relay", false);
+  relayState = RESTORE_STATE ? prefs.getBool("state", false) : false;
+  delay(300);                               // let the supply settle
+  driveRelay();
+  Serial.printf("Relay restored: %s\n", relayState ? "ON" : "OFF");
+
+  // meter sense inputs
+  pinMode(PIN_ON,  INPUT_PULLUP);
+  pinMode(PIN_OFF, INPUT_PULLUP);
+
+  // watchdog: auto-reset if loop() stops petting it
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  esp_task_wdt_config_t wdt = { .timeout_ms = WDT_TIMEOUT * 1000,
+                                .idle_core_mask = 0, .trigger_panic = true };
+  esp_task_wdt_reconfigure(&wdt);
+#else
+  esp_task_wdt_init(WDT_TIMEOUT, true);
+#endif
+  esp_task_wdt_add(NULL);
+
+  lastChangeMs = millis() - SETTLE_MS - 1;  // don't block the first command
+  Serial.println(F("Controller ready."));
+}
+
+void loop() {
+  esp_task_wdt_reset();                      // pet the watchdog every pass
+  uint32_t now = millis();
+
+  int onNow  = digitalRead(PIN_ON);
+  int offNow = digitalRead(PIN_OFF);
+
+  // ---- ON falling edge -> SET ----
+  if (onPrev == HIGH && onNow == LOW) {
+    if (now - onLastEdge > QUIET_MS) onCount = 0;
+    onLastEdge = now;
+    if (onCount < 0xFFFF) onCount++;
+    if (onCount >= MIN_EDGES && (now - lastChangeMs) >= SETTLE_MS && !relayState)
+      applyState(true, now);
+  }
+
+  // ---- OFF falling edge -> RESET ----
+  if (offPrev == HIGH && offNow == LOW) {
+    if (now - offLastEdge > QUIET_MS) offCount = 0;
+    offLastEdge = now;
+    if (offCount < 0xFFFF) offCount++;
+    if (offCount >= MIN_EDGES && (now - lastChangeMs) >= SETTLE_MS && relayState)
+      applyState(false, now);
+  }
+
+  onPrev = onNow;
+  offPrev = offNow;
+
+  // ---- serial override (testing) ----
+  if (Serial.available()) {
+    char c = Serial.read();
+    if      (c == '1' || c == 'o' || c == 'O') applyState(true, now);
+    else if (c == '0' || c == 'f' || c == 'F') applyState(false, now);
+    else if (c == 't' || c == 'T')             applyState(!relayState, now);
+  }
+}
