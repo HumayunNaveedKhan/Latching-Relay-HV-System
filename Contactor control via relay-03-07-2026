@@ -1,0 +1,51 @@
+/*
+ * ESP32-C3 — simple ON/OFF test for the 1-channel HIGH-trigger relay module
+ * (SONGLE SRD-05VDC, opto-isolated, jumper set to HIGH-level trigger).
+ *
+ * HIGH trigger: IN HIGH = relay ON, IN LOW = relay OFF.  (Opposite polarity
+ * to the blue active-low module.) Plain push-pull drive, no Hi-Z needed.
+ *
+ *   Module IN  -> GPIO10
+ *   Module DC- -> ESP GND (common ground)
+ *   Module DC+ -> 5V   (the SRD-05VDC coil needs 5V to pull in)
+ *
+ * Control from the Serial Monitor @ 115200 (send the character):
+ *   1 or o -> relay ON     0 or f -> relay OFF     t -> toggle
+ *
+ * Set AUTO_TOGGLE to true to cycle hands-free every TOGGLE_MS.
+ */
+
+#define RELAY_PIN    10
+#define AUTO_TOGGLE  true     // true = cycle on/off automatically
+#define TOGGLE_MS    5000      // auto-toggle period (ms)
+
+bool relayState = false;
+unsigned long lastToggle = 0;
+
+// HIGH-trigger relay: HIGH = energized, LOW = released.
+void relayOn()  { digitalWrite(RELAY_PIN, HIGH); relayState = true;
+                  Serial.println("Relay ON  (contactor energized)"); }
+void relayOff() { digitalWrite(RELAY_PIN, LOW);  relayState = false;
+                  Serial.println("Relay OFF (contactor released)"); }
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+  pinMode(RELAY_PIN, OUTPUT);
+  relayOff();                  // safe default: OFF (LOW) on boot
+  Serial.println(F("Relay test ready.  Send 1=ON, 0=OFF, t=toggle."));
+}
+
+void loop() {
+  if (Serial.available()) {
+    char c = Serial.read();
+    if      (c == '1' || c == 'o' || c == 'O') relayOn();
+    else if (c == '0' || c == 'f' || c == 'F') relayOff();
+    else if (c == 't' || c == 'T') { relayState ? relayOff() : relayOn(); }
+  }
+
+  if (AUTO_TOGGLE && (millis() - lastToggle >= TOGGLE_MS)) {
+    lastToggle = millis();
+    relayState ? relayOff() : relayOn();
+  }
+}
