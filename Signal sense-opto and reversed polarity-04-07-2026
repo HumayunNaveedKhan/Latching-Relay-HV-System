@@ -1,0 +1,99 @@
+/*
+ * ESP32-C3 — bare sniffer, no filters, fastest response
+ *   ON  -> GPIO1   (via opto, active-low: closed = LOW)
+ *   OFF -> GPIO3
+ * Prints the instant either line changes. Nothing else.
+ */
+
+const int PIN_ON  = 1;
+const int PIN_OFF = 3;
+
+int lastOn = -1, lastOff = -1;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(PIN_ON,  INPUT_PULLUP);
+  pinMode(PIN_OFF, INPUT_PULLUP);
+  Serial.println("watching GPIO1(ON) GPIO3(OFF)...");
+}
+
+void loop() {
+  int on  = digitalRead(PIN_ON);
+  int off = digitalRead(PIN_OFF);
+
+  if (on != lastOn || off != lastOff) {
+    Serial.printf("%lu ms  ON=%s  OFF=%s\n",
+                  millis(),
+                  on  == LOW ? "CLOSED" : "open",
+                  off == LOW ? "CLOSED" : "open");
+    lastOn = on; lastOff = off;
+  }
+}
+
+/* 102106 ms  ON=CLOSED  OFF=open
+105114 ms  ON=open  OFF=open
+105138 ms  ON=CLOSED  OFF=open
+108144 ms  ON=open  OFF=open
+152995 ms  ON=open  OFF=CLOSED
+155995 ms  ON=open  OFF=open
+201995 ms  ON=CLOSED  OFF=open
+207996 ms  ON=open  OFF=open
+325998 ms  ON=open  OFF=CLOSED
+329008 ms  ON=open  OFF=open
+402014 ms  ON=CLOSED  OFF=open
+408009 ms  ON=open  OFF=open
+442002 ms  ON=open  OFF=CLOSED
+445010 ms  ON=open  OFF=open
+476000 ms  ON=CLOSED  OFF=open
+479010 ms  ON=open  OFF=open
+479017 ms  ON=CLOSED  OFF=open
+482020 ms  ON=open  OFF=open
+521001 ms  ON=open  OFF=CLOSED
+524011 ms  ON=open  OFF=open
+573003 ms  ON=CLOSED  OFF=open
+579012 ms  ON=open  OFF=open
+607001 ms  ON=open  OFF=CLOSED
+610002 ms  ON=open  OFF=open
+649018 ms  ON=CLOSED  OFF=open
+655013 ms  ON=open  OFF=open
+718006 ms  ON=open  OFF=CLOSED
+721014 ms  ON=open  OFF=open
+1199013 ms  ON=CLOSED  OFF=open
+1205011 ms  ON=open  OFF=open
+1283115 ms  ON=open  OFF=CLOSED
+1286123 ms  ON=open  OFF=open
+1333085 ms  ON=CLOSED  OFF=open
+1339023 ms  ON=open  OFF=open
+1375057 ms  ON=open  OFF=CLOSED
+1378064 ms  ON=open  OFF=open
+1409017 ms  ON=CLOSED  OFF=open
+1415025 ms  ON=open  OFF=open
+1541017 ms  ON=open  OFF=CLOSED
+1544027 ms  ON=open  OFF=open
+1575017 ms  ON=CLOSED  OFF=open
+1578017 ms  ON=open  OFF=open
+1578018 ms  ON=CLOSED  OFF=open
+1581027 ms  ON=open  OFF=open
+1608020 ms  ON=open  OFF=CLOSED
+1611028 ms  ON=open  OFF=open
+1695118 ms  ON=CLOSED  OFF=open
+1698119 ms  ON=open  OFF=open
+1698165 ms  ON=CLOSED  OFF=open
+1701169 ms  ON=open  OFF=open
+1742022 ms  ON=open  OFF=CLOSED
+1745030 ms  ON=open  OFF=open
+1789023 ms  ON=CLOSED  OFF=open
+1795031 ms  ON=open  OFF=open
+1822022 ms  ON=open  OFF=CLOSED
+1825031 ms  ON=open  OFF=open
+1904025 ms  ON=CLOSED  OFF=open
+1907032 ms  ON=open  OFF=open
+1907036 ms  ON=CLOSED  OFF=open
+1910042 ms  ON=open  OFF=open
+1975123 ms  ON=open  OFF=CLOSED
+1978124 ms  ON=open  OFF=open
+2045027 ms  ON=CLOSED  OFF=open
+2051035 ms  ON=open  OFF=open
+2086026 ms  ON=open  OFF=CLOSED
+2089035 ms  ON=open  OFF=open
+*/
