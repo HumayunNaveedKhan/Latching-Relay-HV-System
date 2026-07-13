@@ -1,7 +1,7 @@
 # Meter‑Triggered Contactor Latching Controller
 ### ESP32‑C3 · Opto‑Isolated Sensing · Fotek SSR · Firmware Latch
 
-A field‑hardened controller that reads a utility energy meter's **remote connect / disconnect** signals and mirrors them onto an external **200 A contactor** — latching the contactor **ON** on a connect pulse and holding it until a disconnect pulse arrives. Built to survive a heavy industrial environment (ACs, motors, contactor switching) without hanging or false‑triggering.
+A field‑hardened controller that reads a utility energy meter's **remote connect / disconnect** signals and mirrors them onto an external **500 A contactor** — latching the contactor **ON** on a connect pulse and holding it until a disconnect pulse arrives. Built to survive a heavy industrial environment (ACs, motors, contactor switching) without hanging or false‑triggering.
 
 > **Status:** Deployed and load‑tested (3 working circuits). Firmware, diagnostics, circuit diagram and this documentation are in the repo.
 > **Author:** Humayun Naveed Khan — R&D Engineer · **Client:** Thal Engineering (Korangi, Karachi).
