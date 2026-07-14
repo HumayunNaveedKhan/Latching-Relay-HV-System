@@ -1,0 +1,125 @@
+/*
+ * ESP32-C3 — Hexing meter -> contactor controller  (FINAL, opto + SSR)
+ * ------------------------------------------------------------------------
+ * Signal (measured, through the optocouplers):
+ *   CONNECT (ON)     -> GPIO1 held LOW ~6 s (sometimes 3 s + blip + 3 s)
+ *   DISCONNECT (OFF) -> GPIO3 held LOW ~3 s
+ *   Mutually exclusive. Real closures are 3000 ms+; noise can't hold an
+ *   isolated opto LOW at all. So: a line LOW past THRESHOLD_MS = that command.
+ *
+ * WIRING
+ *   ON  contact -> opto -> GPIO1   (active-low: closure = LOW, INPUT_PULLUP)
+ *   OFF contact -> opto -> GPIO3
+ *   SSR input + -> GPIO10 ,  SSR input - -> ESP GND   (active-high: HIGH = ON)
+ *   SSR output  -> in series with the 220V contactor coil (its own HiLink)
+ *   Opto LED side on a SEPARATE supply; its GND ties to meter COM only.
+ *
+ * LATCH:  ON command -> SSR ON (held) ; OFF command -> SSR OFF (held).
+ * OVERRIDE (Serial @115200):  1 = ON,  0 = OFF,  t = toggle.
+ * ALIVE:  no interrupts (no storms), no blocking calls, watchdog auto-recovers
+ *         any hang, and the last state is restored on boot so a reset is seamless.
+ */
+
+#include "esp_task_wdt.h"
+#include <Preferences.h>
+
+#define PIN_ON        1
+#define PIN_OFF       3
+#define PIN_SSR       10        // ACTIVE-HIGH SSR: HIGH = ON
+
+#define THRESHOLD_MS  800       // sustained LOW to accept a command (real >= 3000 ms)
+#define WDT_TIMEOUT   8         // seconds before a hung loop is auto-reset
+#define RESTORE_STATE true      // restore last state on boot
+
+Preferences prefs;
+bool relayState = false;        // true = SSR ON (contactor connected)
+
+uint32_t onLowStart = 0, offLowStart = 0;
+bool     onFired = false, offFired = false;
+int      onPrev = HIGH, offPrev = HIGH;
+
+void driveOutput() { digitalWrite(PIN_SSR, relayState ? HIGH : LOW); }   // active-high
+
+void setRelay(bool on) {
+  if (on == relayState) { driveOutput(); return; }        // idempotent
+  relayState = on;
+  driveOutput();
+  prefs.putBool("state", relayState);                     // survive resets
+  Serial.printf("%lu ms  -> %s\n", millis(),
+                on ? "CONNECT (SSR ON)" : "DISCONNECT (SSR OFF)");
+}
+
+void printResetReason() {
+  const char* s;
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  s = "power-on";               break;
+    case ESP_RST_SW:       s = "software";               break;
+    case ESP_RST_PANIC:    s = "PANIC / crash (EMI?)";   break;
+    case ESP_RST_INT_WDT:  s = "INTERRUPT wdt (EMI?)";   break;
+    case ESP_RST_TASK_WDT: s = "TASK wdt / hang (EMI?)"; break;
+    case ESP_RST_WDT:      s = "watchdog";               break;
+    case ESP_RST_BROWNOUT: s = "BROWNOUT / supply dip";  break;
+    default:               s = "other";                  break;
+  }
+  Serial.printf("Reset reason: %s\n", s);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(150);
+
+  pinMode(PIN_SSR, OUTPUT);
+  digitalWrite(PIN_SSR, LOW);               // OFF first (active-high SSR)
+
+  printResetReason();
+
+  prefs.begin("relay", false);
+  relayState = RESTORE_STATE ? prefs.getBool("state", false) : false;
+  delay(200);
+  driveOutput();
+  Serial.printf("Restored: %s\n", relayState ? "ON" : "OFF");
+
+  pinMode(PIN_ON,  INPUT_PULLUP);
+  pinMode(PIN_OFF, INPUT_PULLUP);
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  esp_task_wdt_config_t wdt = { .timeout_ms = WDT_TIMEOUT * 1000,
+                                .idle_core_mask = 0, .trigger_panic = true };
+  esp_task_wdt_reconfigure(&wdt);
+#else
+  esp_task_wdt_init(WDT_TIMEOUT, true);
+#endif
+  esp_task_wdt_add(NULL);
+
+  Serial.println(F("Ready. 1=ON 0=OFF t=toggle"));
+}
+
+void loop() {
+  esp_task_wdt_reset();                      // keep-alive; never blocks below
+  uint32_t now = millis();
+
+  int on  = digitalRead(PIN_ON);
+  int off = digitalRead(PIN_OFF);
+
+  // CONNECT: GPIO1 held LOW past the threshold
+  if (on == LOW) {
+    if (onPrev == HIGH) { onLowStart = now; onFired = false; }
+    if (!onFired && (now - onLowStart) >= THRESHOLD_MS) { onFired = true; setRelay(true); }
+  } else onFired = false;
+  onPrev = on;
+
+  // DISCONNECT: GPIO3 held LOW past the threshold
+  if (off == LOW) {
+    if (offPrev == HIGH) { offLowStart = now; offFired = false; }
+    if (!offFired && (now - offLowStart) >= THRESHOLD_MS) { offFired = true; setRelay(false); }
+  } else offFired = false;
+  offPrev = off;
+
+  // serial override
+  if (Serial.available()) {
+    char c = Serial.read();
+    if      (c == '1' || c == 'o' || c == 'O') setRelay(true);
+    else if (c == '0' || c == 'f' || c == 'F') setRelay(false);
+    else if (c == 't' || c == 'T')             setRelay(!relayState);
+  }
+}
