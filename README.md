@@ -76,7 +76,7 @@ Each command is **not** a single clean closure — it's a **dense burst of extre
 | Rate | ~700 closes/s | ~700–1,000 closes/s |
 | Idle | ~0 closes/s (silent) | ~0 closes/s (silent) |
 
-![Raw signal — burst of short pulses](img/fig1_raw_signal_pulses.png)
+![Raw signal — burst of short pulses](Other Resources/img/fig1_raw_signal_pulses.png)
 *Illustrative rendering of the measured burst density and zoomed pulse widths (not a literal reproduction of every pulse).*
 
 ### 3.2 Post-optocoupler signal (what the ESP actually sees)
@@ -89,11 +89,11 @@ The PC817's finite response time **integrates** the burst into **one clean, sust
 | Consistency | very consistent | very consistent (3000–3010 ms) |
 | Mutually exclusive? | Yes — ON low ⇒ OFF open, always | Yes |
 
-![Sustained signal after opto-isolation](img/fig2_opto_sustained_signal.png)
+![Sustained signal after opto-isolation](Other Resources/img/fig2_opto_sustained_signal.png)
 
 **Why CONNECT (~6 s) is longer than DISCONNECT (~3 s):** the motorized breaker's close + spring-charge sequence takes longer than the open. The occasional "3 s + blip + 3 s" on CONNECT is a single 6 s event where the opto momentarily releases mid-operation — not two separate commands. A handful of "missed" disconnects during testing were meter-side non-events (the breaker didn't actuate on the first web press) — every closure that physically happened was captured.
 
-![Signal metrics comparison](img/fig3_signal_metrics_bars.png)
+![Signal metrics comparison](Other Resources/img/fig3_signal_metrics_bars.png)
 
 ### 3.3 Consequence for the design
 Because the post-opto signal is a **sustained level of ≥ 3 s**, detection collapses to one rule:
@@ -251,7 +251,7 @@ Latching-Relay-HV-System/
 
 Standalone **latching/impulse relays** were evaluated as a no-microcontroller alternative. **Conclusion: not feasible as a drop-in**, for the reasons below.
 
-![Relay units evaluated](img/relay_feasibility_contact_sheet.jpg)
+![Relay units evaluated](Other Resources/img/relay_feasibility_contact_sheet.jpg)
 
 | Device tested | Why it does **not** fit |
 |---|---|
